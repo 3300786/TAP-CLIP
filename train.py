@@ -1,11 +1,15 @@
+# train.py
+
 import torch
 from torch.utils.data import DataLoader
 from models.model_wrapper import FullModel
 from models.clip_wrapper import CLIPWrapper
 from dataset import get_dataloaders
-from utils.eval_metrics import evaluate_accuracy
+from utils.eval_metrics import evaluate_accuracy, evaluate_per_class_accuracy
 from tqdm import tqdm
 import logging
+import matplotlib.pyplot as plt
+import os
 
 
 def train():
@@ -18,9 +22,7 @@ def train():
     patience = 10
     lr = 2e-3
     decay = 0.01
-    # class_names = ['cat', 'dog', 'car', 'plane']  # 示例
-    class_names = ["Backpack", "Alarm_Clock", "Laptop", "Pen", "Mug"]  # 举例
-
+    class_names = ["Backpack", "Alarm_Clock", "Laptop", "Pen", "Mug"]
     pretrained_path = "G:/dsCLIP/open_clip_pytorch_model.bin"
 
     # 模型初始化
@@ -34,7 +36,8 @@ def train():
         adjustor_method='scale',
         class_specific=True
     ).to(device)
-    # 配置 logging
+
+    # logging 配置
     logging.basicConfig(
         format="%(asctime)s | %(levelname)s | %(message)s",
         level=logging.INFO,
@@ -45,17 +48,14 @@ def train():
     optimizer = torch.optim.AdamW(
         model.prompt_learner.parameters(), lr=lr, weight_decay=decay
     )
+
+    # 打印训练参数
     print("\n🔧 Trainable Parameters:")
     for name, param in model.named_parameters():
         if param.requires_grad:
             print(f" - {name} | shape: {tuple(param.shape)}")
 
     # 数据加载
-    from dataset import get_dataloaders
-
-    class_names = ["Backpack", "Alarm_Clock", "Laptop", "Pen", "Mug"]  # 举例
-    # class_names = ['cat', 'dog', 'car', 'plane']  # 示例
-
     train_loader, val_loader = get_dataloaders(
         root_dir="data/OfficeHomeDataset_10072016/Real World",
         class_names=class_names,
@@ -63,9 +63,18 @@ def train():
         num_shots=5,
         preprocess=clip_model.get_preprocess()
     )
+
+    # 提前准备路径
+    os.makedirs("Best Models", exist_ok=True)
+    os.makedirs("visible results", exist_ok=True)
+
     best_acc = 0.0
     current = 0
-    # 主训练循环
+    best_model_state = model.state_dict()
+
+    acc_list = []
+    per_class_dict = {cls: [] for cls in class_names}
+
     for epoch in range(1, epochs + 1):
         model.train()
         total_loss = 0.0
@@ -90,40 +99,43 @@ def train():
 
         # 评估
         acc = evaluate_accuracy(model, val_loader, device)
+        acc_list.append(acc)
         logging.info(f"[Epoch {epoch}] 🧪 Val Accuracy: {acc:.2f}%")
-        # best val?test
+
+        per_cls_acc = evaluate_per_class_accuracy(model, val_loader, device, class_names)
+        for cls in class_names:
+            per_class_dict[cls].append(per_cls_acc[cls])
+        logging.info(f"[Epoch {epoch}] 📊 Per-Class Accuracy: {per_cls_acc}")
+
         if acc > best_acc:
             best_acc = acc
             current = 0
             if acc > 90:
-                model_path = f"Best Models/best_model_epoch{epoch}_acc{acc:.2f}.pt"
-                torch.save(model.state_dict(), model_path)
-                logging.info(f"📦 Model saved: {model_path}")
+                best_model_state = model.state_dict()
         else:
             current += 1
             if current == patience:
                 break
 
+    # 保存模型
+    model_path = f"Best Models/best_model_attr_acc{best_acc:.2f}.pt"
+    torch.save(best_model_state, model_path)
+    logging.info(f"📦 Model saved: {model_path}")
+
+    # 绘图
+    plt.figure(figsize=(10, 6))
+    plt.plot(acc_list, label="Total Accuracy", linewidth=2)
+    for cls in class_names:
+        plt.plot(per_class_dict[cls], label=cls)
+    plt.xlabel("Epoch")
+    plt.ylabel("Accuracy (%)")
+    plt.title("Validation Accuracy per Epoch")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(f"visible results/epoch_acc_curve_acc{best_acc}.png")
+    print("📊 Accuracy plot saved to visible results/epoch_acc_curve.png")
+
 
 if __name__ == "__main__":
     train()
-
-
-"""
-domain shift: allowed for mix bet train sets and val sets (by domain
-测试集必须是不同域 domainnet
-imagenet-X: train on o-imagenet, test on A/R/S, same as 0/few-shot
-domain shift: -unseen domain-, <unseen classes>,
-compare with CoOp/CoCoOp
-domainnet 40G
-OfficeHome 1G
-ImageNet-A/R/S several G
-
-
-CLIP Loss update(image-text, text-image)
-attribution: cross-attn, mask(complexity, could be visible part), combine direction by image(additional net, auxi through image feature)
-
-Purpose: Zero/Few-shot
-0-<16>
-
-"""
