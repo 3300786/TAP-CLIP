@@ -47,8 +47,7 @@ Place OfficeHome or [DomainNet] datasets under data/ directory.
 
 python train.py
 ### 4. Evaluate Cross-Domain Transfer
-bash
-```
+```bash
 python test_cross_domain.py
 Results will be saved as:
 CSV → visible results/cross_domain_results_*.csv
