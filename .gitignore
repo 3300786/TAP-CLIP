@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.ipynb_checkpoints/
+
+# 环境
+env/
+venv/
+.venv/
+*.env
+*.bak
+*.swp
+
+# 日志 & 输出
+*.log
+*.out
+*.tmp
+*.cache/
+*.dat
+*.csv
+*.tsv
+*.npy
+*.npz
+
+# 大模型 & 权重
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.onnx
+runs/
+checkpoints/
+weights/
+
+# Jupyter 输出
+.ipynb_checkpoints/
+*.nbconvert.ipynb
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# VSCode / PyCharm
+.vscode/
+.idea/
+
+# 数据
+data/
+visible results/
+open_clip/
+*.bin
