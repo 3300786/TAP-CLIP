@@ -3,7 +3,7 @@
 **AttrPrompt** is a dynamic prompt learning framework that leverages token attribution to adapt prompts for domain-shifted visual classification. Built on CLIP, it dynamically analyzes attention maps to enhance the alignment between visual and textual modalities, enabling better generalization to unseen domains and classes.
 
 <p align="center">
-  <img src="assets/attrprompt_pipeline.png" width="750"/>
+  <img src="assets/tapclip_frame.png" width="750"/>
 </p>
 
 ## ✨ Features
