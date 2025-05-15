@@ -11,14 +11,16 @@ import logging
 import matplotlib.pyplot as plt
 import os
 
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
 
 def train():
     # 参数配置
     device = "cuda"
     prompt_len = 5
-    attr_lambda = 1.0
+    attr_lambda = 0.05
     stab_lambda = 0.1
-    epochs = 100
+    epochs = 200
     patience = 10
     lr = 2e-3
     decay = 0.01
@@ -46,7 +48,8 @@ def train():
 
     # 优化器
     optimizer = torch.optim.AdamW(
-        model.prompt_learner.parameters(), lr=lr, weight_decay=decay
+        list(model.prompt_learner.parameters()) + list(model.prompt_adjustor.parameters()),
+        lr=lr, weight_decay=decay
     )
 
     # 打印训练参数
@@ -75,6 +78,8 @@ def train():
     acc_list = []
     per_class_dict = {cls: [] for cls in class_names}
 
+    entropy_list = []  # 🆕 添加用于记录每轮 entropy
+
     for epoch in range(1, epochs + 1):
         model.train()
         total_loss = 0.0
@@ -97,11 +102,20 @@ def train():
         avg_loss = total_loss / len(train_loader)
         logging.info(f"[Epoch {epoch}] 🏋️ Avg Train Loss: {avg_loss:.4f}")
 
-        # 评估
+        # 🔍 提取并记录 entropy loss（可选显示）
+        if "loss_entropy" in outputs:
+            entropy_val = outputs["loss_entropy"].item()
+            entropy_list.append(entropy_val)
+            logging.info(f"[Epoch {epoch}] 🔍 Attribution Entropy Loss: {entropy_val:.4f}")
+        else:
+            entropy_list.append(0.0)
+
+        # 🧪 验证准确率
         acc = evaluate_accuracy(model, val_loader, device)
         acc_list.append(acc)
         logging.info(f"[Epoch {epoch}] 🧪 Val Accuracy: {acc:.2f}%")
 
+        # 📊 每类准确率
         per_cls_acc = evaluate_per_class_accuracy(model, val_loader, device, class_names)
         for cls in class_names:
             per_class_dict[cls].append(per_cls_acc[cls])
@@ -117,12 +131,12 @@ def train():
             if current == patience:
                 break
 
-    # 保存模型
+    # 📦 保存模型
     model_path = f"Best Models/best_model_attr_acc{best_acc:.2f}.pt"
     torch.save(best_model_state, model_path)
     logging.info(f"📦 Model saved: {model_path}")
 
-    # 绘图
+    # 📈 准确率曲线
     plt.figure(figsize=(10, 6))
     plt.plot(acc_list, label="Total Accuracy", linewidth=2)
     for cls in class_names:
@@ -135,6 +149,19 @@ def train():
     plt.tight_layout()
     plt.savefig(f"visible results/epoch_acc_curve_acc{best_acc}.png")
     print("📊 Accuracy plot saved to visible results/epoch_acc_curve.png")
+
+    # 📉 Entropy 曲线图
+    if entropy_list:
+        plt.figure(figsize=(8, 4))
+        plt.plot(entropy_list, label="Entropy Loss", color="orange")
+        plt.xlabel("Epoch")
+        plt.ylabel("Entropy")
+        plt.title("Attribution Entropy per Epoch")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig("visible results/epoch_entropy_curve.png")
+        print("📉 Entropy plot saved to visible results/epoch_entropy_curve.png")
 
 
 if __name__ == "__main__":
