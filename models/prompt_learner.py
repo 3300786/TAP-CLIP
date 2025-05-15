@@ -1,3 +1,4 @@
+# models/prompt_learner.py
 import torch
 import torch.nn as nn
 
@@ -31,12 +32,12 @@ class PromptLearner(nn.Module):
             text = f"a photo of a {class_name}"
             tokenized = self.tokenizer(text).to(self.device)  # [token_len]
             token_emb = self.token_embedding(tokenized.unsqueeze(0)).squeeze(0)  # [token_len, dim]
-            self.token_bank[class_name] = token_emb  # store class token
+            self.token_bank[class_name] = token_emb.to(self.device)  # store class token
 
             # Try to extract context tokens from language prompt
             if self.use_init_prompt and token_emb.shape[0] >= 5 + self.prompt_len:
-                # Use tokens 5~(5+prompt_len) from language
                 ctx_init = token_emb[5:5 + self.prompt_len].clone()
+                ctx_init = (ctx_init - ctx_init.mean(dim=0)) / (ctx_init.std(dim=0) + 1e-6)  # ⭐ 加入标准化
             else:
                 ctx_init = torch.randn(self.prompt_len, self.ctx_dim).to(self.device)
 
