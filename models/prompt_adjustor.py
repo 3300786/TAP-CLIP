@@ -4,13 +4,14 @@ import torch.nn.functional as F
 
 
 class PromptAdjustor(nn.Module):
-    def __init__(self, method='scale', prompt_dim=512):
+    def __init__(self, method='scale', prompt_dim=512, use_layernorm=True):
         """
         method: 'scale' | 'gate' | 'residual' | 'mlp' | 'attn'
         """
         super().__init__()
         self.method = method
         self.prompt_dim = prompt_dim
+        self.use_layernorm = use_layernorm
 
         if method == 'gate':
             self.gate_net = nn.Sequential(
@@ -19,23 +20,22 @@ class PromptAdjustor(nn.Module):
                 nn.Linear(64, 1),
                 nn.Sigmoid()
             )
-        elif method == 'residual':
-            self.residual_net = nn.Sequential(
-                nn.Linear(1, 64),
-                nn.ReLU(),
-                nn.Linear(64, prompt_dim)
-            )
-        elif method == 'mlp':
+
+        elif method in ['residual', 'mlp']:
             self.mlp_net = nn.Sequential(
                 nn.Linear(1, 64),
                 nn.ReLU(),
                 nn.Linear(64, prompt_dim)
             )
+
         elif method == 'attn':
             self.attn_q = nn.Linear(1, prompt_dim)
             self.attn_k = nn.Linear(prompt_dim, prompt_dim)
             self.attn_v = nn.Linear(prompt_dim, prompt_dim)
             self.dropout = nn.Dropout(0.1)
+            if use_layernorm:
+                self.ln = nn.LayerNorm(prompt_dim)
+            self.gate = nn.Parameter(torch.tensor(0.5))  # learnable gate
 
     def forward(self, prompt_embed, attribution_score):
         """
@@ -52,13 +52,9 @@ class PromptAdjustor(nn.Module):
             g = self.gate_net(a)  # [B, T, 1]
             return prompt_embed * g
 
-        elif self.method == 'residual':
-            delta = self.residual_net(a)  # [B, T, D]
-            return prompt_embed + delta
-
-        elif self.method == 'mlp':
+        elif self.method in ['residual', 'mlp']:
             delta = self.mlp_net(a)  # [B, T, D]
-            return prompt_embed + delta
+            return prompt_embed + delta if self.method == 'residual' else delta
 
         elif self.method == 'attn':
             q = self.attn_q(a)                    # [B, T, D]
@@ -67,7 +63,9 @@ class PromptAdjustor(nn.Module):
 
             attn_score = torch.softmax(torch.matmul(q, k.transpose(-2, -1)) / (D ** 0.5), dim=-1)  # [B, T, T]
             attn_out = torch.matmul(attn_score, v)  # [B, T, D]
-            return prompt_embed + self.dropout(attn_out)
+
+            out = prompt_embed + self.gate * self.dropout(attn_out)
+            return self.ln(out) if self.use_layernorm else out
 
         else:
             raise ValueError(f"Unknown method: {self.method}")

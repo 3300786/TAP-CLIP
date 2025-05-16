@@ -44,7 +44,7 @@ def main():
     epochs = 27
     o_acc = 97.14
     expand = True
-    model_path = f"Best Models/best_model_attr_acc{acc}.pt"
+    model_path = f"Best Models/best_model_attr_acc{o_acc}.pt"
     seen_class_names = ["Backpack", "Alarm_Clock", "Laptop", "Pen", "Mug"]
     all_class_names = seen_class_names
     prompt_len = 5
@@ -56,21 +56,7 @@ def main():
 
     # -------- Load Model -------- #
     clip_model = CLIPWrapper(pretrained_path=pretrained_path, device=device)
-    model = FullModel(
-        class_names=seen_class_names,
-        clip_wrapper=clip_model,
-        prompt_len=prompt_len,
-        attr_lambda=1.0,
-        stab_lambda=0.1,
-        adjustor_method='scale',
-        class_specific=True
-    ).to(device)
-    model.load_state_dict(torch.load(model_path))
-    model.eval()
 
-    for cls in all_class_names:
-        if cls not in model.prompt_learner.context_bank:
-            model.prompt_learner.add_class_prompt(cls)
 
     # -------- Evaluate -------- #
     results = []
@@ -79,6 +65,23 @@ def main():
         shot_type = f"{num_shots}-shot" if num_shots > 0 else "Zero-Shot"
         for domain in domains:
             print(f"\n🌍 [{shot_type}] Testing on {domain} domain...")
+            # ✅ 每轮构建新的 model（防止污染和 hook 丢失）
+            model = FullModel(
+                class_names=all_class_names,  # 注意这里用 all_class_names！
+                clip_wrapper=clip_model,
+                prompt_len=prompt_len,
+                attr_lambda=1.0,
+                stab_lambda=0.1,
+                adjustor_method='scale',
+                class_specific=True
+            ).to(device)
+            model.load_state_dict(torch.load(model_path))
+            model.eval()
+
+            # ✅ 确保 prompt 补全
+            for cls in all_class_names:
+                if cls not in model.prompt_learner.context_bank:
+                    model.prompt_learner.add_class_prompt(cls)
             train_loader, val_loader = get_dataloaders(
                 root_dir=f"data/OfficeHomeDataset_10072016/{domain}",
                 class_names=all_class_names,
@@ -96,7 +99,9 @@ def main():
 
     # -------- Save -------- #
     df = pd.DataFrame(results)
-    df.to_csv(f"visible results/cross_domain_results_{epochs}_{acc}_{expand}.csv", index=False)
+    from datetime import datetime
+    tag = datetime.now().strftime("%Y%m%d_%H%M")
+    df.to_csv(f"visible results/cross_domain_results_{tag}.csv", index=False)
     print("✅ Results saved to cross_domain_results.csv")
 
     # -------- Plot -------- #
