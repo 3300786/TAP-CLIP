@@ -1,4 +1,3 @@
-# train.py
 
 import torch
 from torch.utils.data import DataLoader
@@ -10,9 +9,9 @@ from tqdm import tqdm
 import logging
 import matplotlib.pyplot as plt
 import os
+from datetime import datetime
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-
 
 def train():
     # 参数配置
@@ -26,6 +25,16 @@ def train():
     decay = 0.01
     class_names = ["Backpack", "Alarm_Clock", "Laptop", "Pen", "Mug"]
     pretrained_path = "G:/dsCLIP/open_clip_pytorch_model.bin"
+
+    # 🔧 存储路径设置
+    now = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_dir = f"results/version2_{now}"
+    model_dir = os.path.join(base_dir, "models")
+    plot_dir = os.path.join(base_dir, "plots")
+    csv_dir = os.path.join(base_dir, "csv")
+    os.makedirs(model_dir, exist_ok=True)
+    os.makedirs(plot_dir, exist_ok=True)
+    os.makedirs(csv_dir, exist_ok=True)
 
     # 模型初始化
     clip_model = CLIPWrapper(pretrained_path=pretrained_path, device=device)
@@ -41,6 +50,7 @@ def train():
 
     # logging 配置
     logging.basicConfig(
+        filename=os.path.join(base_dir, "train.log"),
         format="%(asctime)s | %(levelname)s | %(message)s",
         level=logging.INFO,
         datefmt="%H:%M:%S"
@@ -52,12 +62,6 @@ def train():
         lr=lr, weight_decay=decay
     )
 
-    # 打印训练参数
-    print("\n🔧 Trainable Parameters:")
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            print(f" - {name} | shape: {tuple(param.shape)}")
-
     # 数据加载
     train_loader, val_loader = get_dataloaders(
         root_dir="data/OfficeHomeDataset_10072016/Real World",
@@ -67,24 +71,19 @@ def train():
         preprocess=clip_model.get_preprocess()
     )
 
-    # 提前准备路径
-    os.makedirs("Best Models", exist_ok=True)
-    os.makedirs("visible results", exist_ok=True)
-
     best_acc = 0.0
     current = 0
     best_model_state = model.state_dict()
 
     acc_list = []
     per_class_dict = {cls: [] for cls in class_names}
-
-    entropy_list = []  # 🆕 添加用于记录每轮 entropy
+    entropy_list = []
 
     for epoch in range(1, epochs + 1):
         model.train()
         total_loss = 0.0
-
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch} [Train]", ncols=100)
+
         for images, labels in progress_bar:
             images = images.to(device)
             labels = labels.to(device)
@@ -102,7 +101,6 @@ def train():
         avg_loss = total_loss / len(train_loader)
         logging.info(f"[Epoch {epoch}] 🏋️ Avg Train Loss: {avg_loss:.4f}")
 
-        # 🔍 提取并记录 entropy loss（可选显示）
         if "loss_entropy" in outputs:
             entropy_val = outputs["loss_entropy"].item()
             entropy_list.append(entropy_val)
@@ -110,12 +108,10 @@ def train():
         else:
             entropy_list.append(0.0)
 
-        # 🧪 验证准确率
         acc = evaluate_accuracy(model, val_loader, device)
         acc_list.append(acc)
         logging.info(f"[Epoch {epoch}] 🧪 Val Accuracy: {acc:.2f}%")
 
-        # 📊 每类准确率
         per_cls_acc = evaluate_per_class_accuracy(model, val_loader, device, class_names)
         for cls in class_names:
             per_class_dict[cls].append(per_cls_acc[cls])
@@ -131,12 +127,12 @@ def train():
             if current == patience:
                 break
 
-    # 📦 保存模型
-    model_path = f"Best Models/best_model_attr_acc{best_acc:.2f}.pt"
+    # 保存模型
+    model_path = os.path.join(model_dir, f"best_model_attr_acc{best_acc:.2f}.pt")
     torch.save(best_model_state, model_path)
     logging.info(f"📦 Model saved: {model_path}")
 
-    # 📈 准确率曲线
+    # Accuracy 折线图
     plt.figure(figsize=(10, 6))
     plt.plot(acc_list, label="Total Accuracy", linewidth=2)
     for cls in class_names:
@@ -147,10 +143,9 @@ def train():
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(f"visible results/epoch_acc_curve_acc{best_acc}.png")
-    print("📊 Accuracy plot saved to visible results/epoch_acc_curve.png")
+    plt.savefig(os.path.join(plot_dir, "epoch_acc_curve.png"))
 
-    # 📉 Entropy 曲线图
+    # Entropy 折线图
     if entropy_list:
         plt.figure(figsize=(8, 4))
         plt.plot(entropy_list, label="Entropy Loss", color="orange")
@@ -160,9 +155,7 @@ def train():
         plt.grid(True)
         plt.legend()
         plt.tight_layout()
-        plt.savefig("visible results/epoch_entropy_curve.png")
-        print("📉 Entropy plot saved to visible results/epoch_entropy_curve.png")
-
+        plt.savefig(os.path.join(plot_dir, "epoch_entropy_curve.png"))
 
 if __name__ == "__main__":
     train()
