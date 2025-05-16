@@ -86,22 +86,23 @@ def attribution_entropy(attribution_scores):
 
 def attribution_variance(attribution_scores, labels):
     """
+    计算每类样本的 token attribution 的方差（鼓励同类之间归因一致）
     attribution_scores: [B, prompt_len]
     labels: [B]
-    返回: scalar tensor（可导）
     """
-    label_dict = defaultdict(list)
-    for a, l in zip(attribution_scores, labels):
-        label_dict[int(l.item())].append(a)
-
+    unique_labels = labels.unique()
     variances = []
-    for group in label_dict.values():
-        group_tensor = torch.stack(group, dim=0)  # [N, prompt_len]
-        var = group_tensor.var(dim=0).mean()  # scalar tensor
-        variances.append(var)
+    for c in unique_labels:
+        mask = labels == c
+        group = attribution_scores[mask]  # [Nc, prompt_len]
+        if group.size(0) > 1:  # 至少有两个样本才能计算方差
+            var = group.var(dim=0).mean()  # [prompt_len] → scalar
+            variances.append(var)
+        else:
+            # ✅ 保持 device 一致，且类型为 tensor
+            variances.append(torch.tensor(0.0, device=attribution_scores.device))
 
     return torch.stack(variances).mean() if variances else torch.tensor(0.0, device=attribution_scores.device)
-
 
 @torch.no_grad()
 def visualize_attribution_for_class(model, dataloader, target_class, epoch,
@@ -109,18 +110,17 @@ def visualize_attribution_for_class(model, dataloader, target_class, epoch,
     """
     可视化特定类别的 Prompt Attribution。
     每个样本画一张柱状图 + 保存原图。
-    支持 FullModel 输出 attribution: [B, C, prompt_len]
+    支持 FullModel 输出 attribution: [B, prompt_len]
     """
     os.makedirs(save_dir, exist_ok=True)
-
     model.eval()
     count = 0
 
     for images, labels in dataloader:
         images = images.to(device)
         labels = labels.to(device)
-
         mask = labels == target_class
+
         if mask.sum() == 0:
             continue
 
@@ -132,14 +132,23 @@ def visualize_attribution_for_class(model, dataloader, target_class, epoch,
             print("No attribution scores found.")
             return
 
-        attributions = outputs['attribution'].cpu()  # [B, C, prompt_len]
-        for idx, (img, attr) in enumerate(zip(selected_images.cpu(), attributions)):
-            attr_c = attr  # [prompt_len]
+        attributions = outputs['attribution'].cpu()  # [B, prompt_len]
 
-            # 绘制柱状图
+        for idx, (img, attr) in enumerate(zip(selected_images.cpu(), attributions)):
+            attr = attr.tolist()
+            mean_attr = sum(attr) / len(attr)
+            max_attr = max(attr)
+            min_attr = min(attr)
+
+            # 可视化归因变化范围
             plt.figure(figsize=(10, 2))
-            plt.bar(range(len(attr_c)), attr_c.tolist(), color='orange')
-            plt.title(f"Epoch {epoch} | Sample {idx} | Class {target_class}")
+            bars = plt.bar(range(len(attr)), attr, color='orange')
+            for i, bar in enumerate(bars):
+                if attr[i] == max_attr:
+                    bar.set_color('red')
+                elif attr[i] == min_attr:
+                    bar.set_color('blue')
+            plt.title(f"Epoch {epoch} | Sample {idx} | Class {target_class} | max={max_attr:.3f}, min={min_attr:.3f}")
             plt.xlabel("Prompt Token Index")
             plt.ylabel("Attribution Score")
             plt.tight_layout()
