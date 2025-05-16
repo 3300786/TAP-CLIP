@@ -49,9 +49,17 @@ class FullModel(nn.Module):
             attributions = []
             for b in range(B):
                 single_prompt = full_prompt[b].unsqueeze(0)
+                """
+                # ✅ 用于可导归因分析
+                attn_map = self.clip.get_attention_weights_from_prompt_embedding(full_prompt)  # [B, T, T]
+                attr = self.attribution_monitor(attn_map)  # [B, prompt_len] 可导！
+
+                """
+                # ❌ 不可导
                 self.clip.reset()
                 _ = self.clip.model.transformer(single_prompt)
                 attn_map = self.clip.get_attention_map().to(images.device)
+
                 if attn_map.dim() == 2:
                     attn_map = attn_map.unsqueeze(0)
                 attr = self.attribution_monitor(attn_map)
@@ -80,9 +88,9 @@ class FullModel(nn.Module):
             loss_cls = F.cross_entropy(logits, labels)
             all_attr = torch.stack(all_attributions, dim=1)  # [B, C, prompt_len]
 
-            if True or self.training_epoch < self.warmup_epoch:
+            if self.training_epoch < self.warmup_epoch:
                 loss_total = loss_cls
-                print(f"🔧 Warmup epoch {self.training_epoch + 1}/{self.warmup_epoch}: skipping attribution regularization")
+                print(f"🔧 Warmup epoch {self.training_epoch}/{self.warmup_epoch}: skipping attribution regularization")
             else:
                 entropy_loss = attribution_entropy(all_attr.mean(dim=1))
                 variance_loss = attribution_variance(all_attr.mean(dim=1), labels)

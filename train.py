@@ -1,3 +1,5 @@
+# train.py
+
 import torch
 from torch.utils.data import DataLoader
 from models.model_wrapper import FullModel
@@ -22,7 +24,11 @@ def set_seed(seed=42):
     torch.backends.cudnn.benchmark = False
 
 def train():
-    # 参数配置
+    # ===================== 配置 =====================
+    version = "version3"
+    tag = datetime.now().strftime("%Y%m%d_%H%M")
+    base_dir = f"results/{version}/{tag}"
+
     device = "cuda"
     prompt_len = 5
     attr_lambda = 0.05
@@ -31,15 +37,25 @@ def train():
     patience = 10
     lr = 2e-3
     decay = 0.01
-    warmup_epoch = 10
+    warmup_epoch = 20
+    seed = 42
+    resume = False
     class_names = ["Backpack", "Alarm_Clock", "Laptop", "Pen", "Mug"]
     pretrained_path = "G:/dsCLIP/open_clip_pytorch_model.bin"
-    seed = 42
-    resume = True  # ✅ 是否启用断点恢复训练
+
+    os.makedirs(base_dir, exist_ok=True)
+    log_dir = os.path.join(base_dir, "logs")
+    fig_dir = os.path.join(base_dir, "figures")
+    model_dir = os.path.join(base_dir, "models")
+    checkpoint_dir = os.path.join(base_dir, "checkpoints")
+    os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(fig_dir, exist_ok=True)
+    os.makedirs(model_dir, exist_ok=True)
+    os.makedirs(checkpoint_dir, exist_ok=True)
 
     set_seed(seed)
 
-    # 模型初始化
+    # ===================== 模型初始化 =====================
     clip_model = CLIPWrapper(pretrained_path=pretrained_path, device=device)
     model = FullModel(
         class_names=class_names,
@@ -52,10 +68,10 @@ def train():
         warmup_epoch=warmup_epoch
     ).to(device)
 
-    os.makedirs("logs", exist_ok=True)
-    log_filename = f"logs/train_{datetime.now().strftime('%Y%m%d_%H%M')}.log"
+    # ===================== Logging =====================
+    log_file = os.path.join(log_dir, f"train_{tag}.log")
     logging.basicConfig(
-        filename=log_filename,
+        filename=log_file,
         filemode='w',
         format="%(asctime)s | %(levelname)s | %(message)s",
         level=logging.INFO,
@@ -76,9 +92,9 @@ def train():
     best_acc = 0.0
     best_model_state = model.state_dict()
 
-    # 尝试恢复训练
-    if resume and os.path.exists("checkpoints/last_checkpoint.pt"):
-        checkpoint = torch.load("checkpoints/last_checkpoint.pt")
+    checkpoint_path = os.path.join(checkpoint_dir, "last_checkpoint.pt")
+    if resume and os.path.exists(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
@@ -87,13 +103,7 @@ def train():
     else:
         logging.info("🚀 Starting new training from scratch")
 
-    # 打印训练参数
-    logging.info("\n🔧 Trainable Parameters:")
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            logging.info(f" - {name} | shape: {tuple(param.shape)}")
-
-    # 数据加载
+    # ===================== 数据加载 =====================
     train_loader, val_loader = get_dataloaders(
         root_dir="data/OfficeHomeDataset_10072016/Real World",
         class_names=class_names,
@@ -102,46 +112,43 @@ def train():
         preprocess=clip_model.get_preprocess()
     )
 
-    os.makedirs("Best Models", exist_ok=True)
-    os.makedirs("visible results", exist_ok=True)
-    os.makedirs("checkpoints", exist_ok=True)
-
     acc_list = []
     per_class_dict = {cls: [] for cls in class_names}
     entropy_list = []
     current = 0
 
+    # ===================== 训练循环 =====================
     for epoch in range(start_epoch, epochs + 1):
         model.train()
-        total_loss = 0.0
         model.training_epoch = epoch
+        total_loss = 0.0
+
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch} [Train]", ncols=100)
         for images, labels in progress_bar:
             images = images.to(device)
             labels = labels.to(device)
 
-            model.current_epoch = epoch
             outputs = model(images, labels)
-
             loss = outputs['loss']
             total_loss += loss.item()
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-
             progress_bar.set_postfix(loss=loss.item())
 
+            # Logging entropy loss
             if "loss_entropy" in outputs:
                 entropy_val = outputs["loss_entropy"].item()
                 entropy_list.append(entropy_val)
-                logging.info(f"[Epoch {epoch}] 🔍 Attribution Entropy Loss: {entropy_val:.4f}")
+                logging.info(f"[Epoch {epoch}] 🔍 Entropy Loss: {entropy_val:.4f}")
             else:
                 entropy_list.append(0.0)
 
         avg_loss = total_loss / len(train_loader)
         logging.info(f"[Epoch {epoch}] 🏋️ Avg Train Loss: {avg_loss:.4f}")
 
+        # ===================== 验证 =====================
         acc = evaluate_accuracy(model, val_loader, device)
         acc_list.append(acc)
         logging.info(f"[Epoch {epoch}] 🧪 Val Accuracy: {acc:.2f}%")
@@ -154,31 +161,32 @@ def train():
         if epoch % 10 == 0:
             _ = visualize_attribution_for_class(model, val_loader, target_class=0, epoch=epoch, device=device)
 
+        # ===================== Early Stopping & Checkpoint =====================
         if acc > best_acc:
             best_acc = acc
             best_epoch = epoch
             current = 0
             best_model_state = model.state_dict()
-            logging.info(f"✅ Best model from epoch {best_epoch}, Accuracy: {best_acc:.2f}%")
+            logging.info(f"✅ New best at epoch {epoch}, acc={best_acc:.2f}%")
         else:
             current += 1
             if current == patience:
-                logging.info(f"⏹ Early Stopping triggered at epoch {epoch}. Best Acc = {best_acc:.2f}%")
+                logging.info(f"⏹ Early stopping triggered at epoch {epoch}. Best Acc = {best_acc:.2f}%")
                 break
 
-        # 保存 checkpoint
         torch.save({
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'best_acc': best_acc
-        }, "checkpoints/last_checkpoint.pt")
-    tag = datetime.now().strftime("%Y%m%d_%H%M")
-    # 📦 保存最优模型
-    model_path = f"Best Models/best_model_attr_{tag}.pt"
-    torch.save(best_model_state, model_path)
-    logging.info(f"✅ Training completed. Best Accuracy: {best_acc:.2f}%, Model saved to: {model_path}")
+        }, checkpoint_path)
 
+    # ===================== 保存模型 =====================
+    model_path = os.path.join(model_dir, f"best_model_attr_{tag}_acc{best_acc:.2f}.pt")
+    torch.save(best_model_state, model_path)
+    logging.info(f"📦 Best model saved to: {model_path}")
+
+    # ===================== 保存图像 =====================
     plt.figure(figsize=(10, 6))
     plt.plot(acc_list, label="Total Accuracy", linewidth=2)
     for cls in class_names:
@@ -189,14 +197,13 @@ def train():
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(f"visible results/epoch_acc_curve_acc{best_acc}.png")
-    logging.info("📊 Accuracy plot saved to visible results/epoch_acc_curve.png")
+    plt.savefig(os.path.join(fig_dir, f"epoch_acc_curve_acc{best_acc}.png"))
+    logging.info("📊 Accuracy plot saved.")
 
     if entropy_list:
         plt.figure(figsize=(8, 4))
         def smooth_curve(values, window=5):
             return np.convolve(values, np.ones(window) / window, mode='valid')
-
         plt.plot(smooth_curve(entropy_list), label="Entropy Loss (smoothed)", color="orange")
         plt.xlabel("Epoch")
         plt.ylabel("Entropy")
@@ -204,8 +211,8 @@ def train():
         plt.grid(True)
         plt.legend()
         plt.tight_layout()
-        plt.savefig("visible results/epoch_entropy_curve.png")
-        logging.info("📉 Entropy plot saved to visible results/epoch_entropy_curve.png")
+        plt.savefig(os.path.join(fig_dir, "epoch_entropy_curve.png"))
+        logging.info("📉 Entropy plot saved.")
 
 if __name__ == "__main__":
     train()
