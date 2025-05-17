@@ -8,99 +8,104 @@ from models.prompt_learner import PromptLearner
 from utils.eval_metrics import attribution_entropy, attribution_variance
 from math import cos, pi
 
+
 class FullModel(nn.Module):
-    def __init__(self, class_names, clip_wrapper, prompt_len=5, attr_lambda=0.05, stab_lambda=0.1,
-                 adjustor_method='scale', class_specific=False, warmup_epoch=0):
+    def __init__(self, class_names, clip_wrapper, prompt_len=5, prefix_len=5,
+                 attr_lambda=0.05, stab_lambda=0.1, adjustor_method='scale',
+                 class_specific=True, warmup_epoch=0):
         super().__init__()
         self.clip = clip_wrapper
         self.class_names = class_names
-        self.prompt_learner = PromptLearner(class_names, clip_wrapper, prompt_len, class_specific)
+        self.prompt_learner = PromptLearner(
+            class_names, clip_wrapper, prompt_len, prefix_len
+        )
         self.n_cls = len(class_names)
-        self.attribution_monitor = AttributionMonitor(prompt_len)
+        self.attribution_monitor = AttributionMonitor(prompt_len, prefix_len)
         self.prompt_adjustor = PromptAdjustor(method=adjustor_method)
 
         self.attr_lambda = attr_lambda
         self.stab_lambda = stab_lambda
         self.logit_scale = nn.Parameter(torch.ones([]) * torch.log(torch.tensor(1 / 0.07)))
         self.warmup_epoch = warmup_epoch
-
-        self.training_epoch = 0  # ✅ 用于外部控制当前 epoch（推荐在 train.py 中手动设置）
+        self.training_epoch = 0  # for warmup schedule externally
 
     def forward(self, images, labels=None, return_attribution=False):
         B = images.size(0)
 
-        raw_prompt = self.prompt_learner()
-        prompt_len = self.prompt_learner.prompt_len
+        # Prepare prompts
+        raw_prompt = self.prompt_learner()  # [C, T, D]
+        prompt_len = self.prompt_learner.prompt_len + self.prompt_learner.prefix_len
         context_prompt = raw_prompt[:, :prompt_len, :]
         class_tokens = raw_prompt[:, prompt_len:, :]
 
         image_feat = self.clip.encode_image(images)
         image_feat = image_feat / image_feat.norm(dim=-1, keepdim=True)
 
-        logits = []
-        all_attributions = []
-
-        class_names = list(self.prompt_learner.context_bank.keys())
-        for i, class_name in enumerate(class_names):
+        # === One-pass Attribution ===
+        prompt_list = []
+        for i in range(self.n_cls):
             ctx = context_prompt[i].unsqueeze(0).expand(B, -1, -1)
             cls = class_tokens[i].unsqueeze(0).expand(B, -1, -1)
-            full_prompt = torch.cat([ctx, cls], dim=1)
+            prompt = torch.cat([ctx, cls], dim=1)
+            prompt_list.append(prompt)
+        all_prompts = torch.cat(prompt_list, dim=0)  # [B*C, T, D]
 
-            attributions = []
-            for b in range(B):
-                single_prompt = full_prompt[b].unsqueeze(0)
-                """
-                # ✅ 用于可导归因分析
-                attn_map = self.clip.get_attention_weights_from_prompt_embedding(full_prompt)  # [B, T, T]
-                attr = self.attribution_monitor(attn_map)  # [B, prompt_len] 可导！
+        with torch.no_grad():
+            attn_map = self.clip.get_attention_weights_from_prompt_embedding(all_prompts)
 
-                """
-                # ❌ 不可导
-                self.clip.reset()
-                _ = self.clip.model.transformer(single_prompt)
-                attn_map = self.clip.get_attention_map().to(images.device)
+        # ✅ 修复 reshape 报错：动态获取 B、C 并 reshape 成 [C, B, T, T]
+        BxC, T, T2 = attn_map.shape
+        assert T == T2, f"Expected square attention map, but got shape {attn_map.shape}"
 
-                if attn_map.dim() == 2:
-                    attn_map = attn_map.unsqueeze(0)
-                attr = self.attribution_monitor(attn_map)
-                attributions.append(attr)
+        expected = B * self.n_cls
+        if attn_map is None or attn_map.shape[0] != expected:
+            raise RuntimeError(f"⚠️ Expected {expected} attention maps (B={B}, C={self.n_cls}), "
+                               f"but got {attn_map.shape if attn_map is not None else 'None'}")
+        attn_map = attn_map.view(B, self.n_cls, T, T).permute(1, 0, 2, 3)  # → [C, B, T, T]
 
-            attribution = torch.cat(attributions, dim=0)  # [B, prompt_len]
-            all_attributions.append(attribution)
+        all_attr = []
+        adjusted_prompts = []
+        for i in range(self.n_cls):
+            attr = self.attribution_monitor(attn_map[i])  # [B, prompt_len]
+            ctx = context_prompt[i].unsqueeze(0).expand(B, -1, -1)  # [B, prefix + prompt, D]
+            cls = class_tokens[i].unsqueeze(0).expand(B, -1, -1)
 
-            adjusted_ctx = self.prompt_adjustor(ctx, attribution)
+            prefix = ctx[:, :self.prompt_learner.prefix_len, :]  # [B, prefix_len, D]
+            ctx_only = ctx[:, self.prompt_learner.prefix_len:, :]  # [B, prompt_len, D]
+            adjusted_ctx_only = self.prompt_adjustor(ctx_only, attr)  # [B, prompt_len, D]
+            adjusted_ctx = torch.cat([prefix, adjusted_ctx_only], dim=1)
+
             adjusted_prompt = torch.cat([adjusted_ctx, cls], dim=1)
 
-            text_feat = self.clip.model.transformer(adjusted_prompt)
-            text_feat = text_feat[torch.arange(B), -1, :]
-            text_feat = text_feat @ self.clip.model.text_projection
-            text_feat = text_feat / text_feat.norm(dim=-1, keepdim=True)
+            all_attr.append(attr)
+            adjusted_prompts.append(adjusted_prompt)
 
-            sim = self.logit_scale.exp() * (image_feat * text_feat).sum(dim=-1, keepdim=True)
-            logits.append(sim)
+        all_attr = torch.stack(all_attr, dim=1)  # [B, C, prompt_len]
+        adjusted_prompts = torch.stack(adjusted_prompts, dim=1)  # [B, C, T, D]
 
-        logits = torch.cat(logits, dim=1)  # [B, n_cls]
+        # === One-pass Text Encoding ===
+        flat_prompts = adjusted_prompts.view(B * self.n_cls, -1, adjusted_prompts.size(-1))
+        with torch.no_grad():
+            text_feat = self.clip.encode_text_from_embeddings(flat_prompts)
+        text_feat = text_feat / text_feat.norm(dim=-1, keepdim=True)
+        text_feat = text_feat.view(B, self.n_cls, -1)
+
+        sim = self.logit_scale.exp() * (image_feat.unsqueeze(1) * text_feat).sum(dim=-1)
+        logits = sim
+
         outputs = {"logits": logits}
-        # if labels is not None or return_attribution:
-        all_attr = torch.stack(all_attributions, dim=1)  # [B, C, prompt_len]
 
         if labels is not None:
             loss_cls = F.cross_entropy(logits, labels)
-            all_attr = torch.stack(all_attributions, dim=1)  # [B, C, prompt_len]
-
-            if self.training_epoch < self.warmup_epoch:
-                scale = self.training_epoch / self.warmup_epoch  # 线性递增，范围 [0, 1]
-                # scale = 0.5 * (1 - cos(pi * self.training_epoch / self.warmup_epoch))
-            else:
-                scale = 1.0
+            scale = 0.5 * (1 - cos(pi * self.training_epoch / self.warmup_epoch)) \
+                if self.training_epoch < self.warmup_epoch else 1.0
 
             entropy_loss = attribution_entropy(all_attr.mean(dim=1))
             variance_loss = attribution_variance(all_attr.mean(dim=1), labels)
-
             loss_total = (
-                    loss_cls
-                    + scale * self.stab_lambda * entropy_loss
-                    + scale * self.attr_lambda * variance_loss
+                loss_cls
+                + scale * self.stab_lambda * entropy_loss
+                + scale * self.attr_lambda * variance_loss
             )
 
             outputs.update({

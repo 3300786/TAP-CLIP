@@ -49,7 +49,7 @@ def main():
     # -------- Config -------- #
     pretrained_path = "G:/dsCLIP/open_clip_pytorch_model.bin"
     model_acc = 97.43
-    model_path = r"G:\dsCLIP\results\version3\20250517_1953\models\best_model_attr_20250517_1953_acc97.43.pt"
+    model_path = r"G:\dsCLIP\results\version3\20250518_0001\models\best_model_attr_20250518_0001_acc99.14.pt"
 
     class_names = ["Backpack", "Alarm_Clock", "Laptop", "Pen", "Mug"]
     prompt_len = 5
@@ -77,7 +77,7 @@ def main():
                 prompt_len=prompt_len,
                 attr_lambda=1.0,
                 stab_lambda=0.1,
-                adjustor_method='scale',
+                adjustor_method='residual',
                 class_specific=True
             ).to(device)
             model.load_state_dict(torch.load(model_path))
