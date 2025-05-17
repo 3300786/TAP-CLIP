@@ -63,7 +63,7 @@ def train():
         prompt_len=prompt_len,
         attr_lambda=attr_lambda,
         stab_lambda=stab_lambda,
-        adjustor_method='scale',
+        adjustor_method='residual',
         class_specific=True,
         warmup_epoch=warmup_epoch
     ).to(device)

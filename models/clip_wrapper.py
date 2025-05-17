@@ -56,30 +56,73 @@ class CLIPWrapper(nn.Module):
         return self.preprocess
 
     # ✅ 新增：从已构建 prompt embedding 中获得 attention
-    def get_attention_weights_from_prompt_embedding(self, prompt_embeddings):
+    def get_attention_weights_from_prompt_embedding(self, prompt_embeddings, chunk_size=16):
         """
-        prompt_embeddings: [B, T, D]
-        返回: attention map [B, T, T]（mean over heads, 可导）
-        """
-        T = prompt_embeddings.size(1)
-        B = prompt_embeddings.size(0)
-        D = prompt_embeddings.size(2)
+        计算给定 prompt embedding 的 attention 权重（mean over heads, 可导）
 
+        Args:
+            prompt_embeddings: Tensor of shape [B*C, T, D]
+            chunk_size: number of samples per forward pass to reduce memory usage
+
+        Returns:
+            Tensor of shape [B*C, T, T]: averaged attention maps
+        """
+        BxC, T, D = prompt_embeddings.size()
+        device = prompt_embeddings.device
         max_pos = self.model.positional_embedding.size(0)
 
         if T > max_pos:
-            raise ValueError(f"🚫 Prompt token length ({T}) exceeds CLIP max position ({max_pos}). "
-                             f"Reduce prompt_len or simplify class names.")
+            raise ValueError(f"🚫 Prompt token length ({T}) exceeds CLIP max position ({max_pos})")
 
-        # Positional embedding
-        pos_emb = self.model.positional_embedding[:T, :].unsqueeze(0)  # [1, T, D]
-        x = prompt_embeddings + pos_emb  # [B, T, D]
+        pos_emb = self.model.positional_embedding[:T, :].unsqueeze(0).to(device)  # [1, T, D]
+        outputs = []
 
-        for block in self.model.transformer.resblocks[:-1]:
-            x = block(x)
+        for i in range(0, BxC, chunk_size):
+            chunk = prompt_embeddings[i: i + chunk_size]  # [chunk_size, T, D]
+            x = chunk + pos_emb  # [chunk_size, T, D]
 
-        # 最后一层，提取注意力
-        last_block = self.model.transformer.resblocks[-1]
-        x_res, attn_weights = last_block.attn(x, need_weights=True)  # attn_weights: [B, H, T, T]
-        attn_mean = attn_weights.mean(dim=1)  # [B, T, T]
-        return attn_mean
+            for block in self.model.transformer.resblocks[:-1]:
+                x = block(x)
+
+            last_block = self.model.transformer.resblocks[-1]
+            x_norm = last_block.ln_1(x)
+
+            # Use attention module with need_weights=True to extract [B, H, T, T]
+            attn_out, attn_weights = last_block.attn(
+                query=x_norm,
+                key=x_norm,
+                value=x_norm,
+                need_weights=True,
+                average_attn_weights=False  # must be False to get full attn matrix
+            )
+
+            if attn_weights.dim() != 4 or attn_weights.shape[-2:] != (T, T):
+                raise RuntimeError(f"❌ Unexpected attn_weights shape: {attn_weights.shape}, expected [B, H, T, T]")
+
+            attn_mean = attn_weights.mean(dim=1)  # [chunk_size, T, T]
+            outputs.append(attn_mean)
+
+        return torch.cat(outputs, dim=0)  # [B*C, T, T]
+
+    def encode_text_from_embeddings(self, token_embeddings, eot_index=None):
+        """
+        Args:
+            token_embeddings: [B, T, D] 输入的是 embedding（非 token id）
+            eot_index: 指定用于提取文本特征的位置索引，默认使用最后一个 token
+        Returns:
+            text features: [B, D]
+        """
+        x = token_embeddings + self.model.positional_embedding[:token_embeddings.size(1)].to(token_embeddings.device)
+        x = x.permute(1, 0, 2)  # [T, B, D]
+        x = self.model.transformer(x)
+        x = x.permute(1, 0, 2)  # [B, T, D]
+        x = self.model.ln_final(x)
+
+        if eot_index is None:
+            eot_index = x.shape[1] - 1  # 默认最后一位
+        x = x[torch.arange(x.shape[0]), eot_index, :]
+        x = x @ self.model.text_projection
+        return x
+
+    def get_max_text_len(self):
+        return self.model.positional_embedding.size(0)

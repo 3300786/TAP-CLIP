@@ -86,23 +86,23 @@ def attribution_entropy(attribution_scores):
 
 def attribution_variance(attribution_scores, labels):
     """
-    计算每类样本的 token attribution 的方差（鼓励同类之间归因一致）
     attribution_scores: [B, prompt_len]
     labels: [B]
     """
-    unique_labels = labels.unique()
-    variances = []
-    for c in unique_labels:
-        mask = labels == c
-        group = attribution_scores[mask]  # [Nc, prompt_len]
-        if group.size(0) > 1:  # 至少有两个样本才能计算方差
-            var = group.var(dim=0).mean()  # [prompt_len] → scalar
-            variances.append(var)
-        else:
-            # ✅ 保持 device 一致，且类型为 tensor
-            variances.append(torch.tensor(0.0, device=attribution_scores.device))
+    if attribution_scores.size(0) != labels.size(0):
+        raise ValueError(f"Mismatch in batch size: attribution_scores={attribution_scores.shape}, labels={labels.shape}")
 
-    return torch.stack(variances).mean() if variances else torch.tensor(0.0, device=attribution_scores.device)
+    classes = torch.unique(labels)
+    variances = []
+    for c in classes:
+        mask = (labels == c)
+        group = attribution_scores[mask]  # [Nc, prompt_len]
+        if group.size(0) > 1:
+            variances.append(group.var(dim=0).mean())
+        else:
+            variances.append(torch.tensor(0.0).to(attribution_scores.device))  # 忽略单样本类别
+
+    return torch.stack(variances).mean()
 
 @torch.no_grad()
 def visualize_attribution_for_class(model, dataloader, target_class, epoch,
@@ -196,3 +196,27 @@ def plot_entropy_distribution(model, dataloader, device, save_path="results/attr
     plt.savefig(save_path)
     plt.close()
     print(f"✅ Entropy distribution saved: {save_path}")
+
+def assert_all_on_gpu(model, *tensors):
+    """
+    检查模型参数和输入是否都在 GPU 上。否则报错。
+    用法：
+        assert_all_on_gpu(model, image_tensor, prompt_tensor, ...)
+    """
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available on this machine.")
+
+    # 检查模型参数是否都在 CUDA 上
+    for name, param in model.named_parameters():
+        if param.device.type != 'cuda':
+            raise RuntimeError(f"Model parameter '{name}' is on {param.device}, expected CUDA.")
+
+    # 检查每个输入张量是否在 CUDA 上
+    for i, tensor in enumerate(tensors):
+        if isinstance(tensor, torch.Tensor):
+            if tensor.device.type != 'cuda':
+                raise RuntimeError(f"Input tensor at position {i} is on {tensor.device}, expected CUDA.")
+        else:
+            raise TypeError(f"Argument at position {i} is not a torch.Tensor.")
+
+    print("✅ All model parameters and inputs are on CUDA.")
