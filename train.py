@@ -115,6 +115,7 @@ def train():
     acc_list = []
     per_class_dict = {cls: [] for cls in class_names}
     entropy_list = []
+    variance_list = []
     current = 0
 
     # ===================== 训练循环 =====================
@@ -140,10 +141,13 @@ def train():
             # Logging entropy loss
             if "loss_entropy" in outputs:
                 entropy_val = outputs["loss_entropy"].item()
+                variance_val = outputs["loss_variance"].item()
                 entropy_list.append(entropy_val)
+                variance_list.append(variance_val)
                 logging.info(f"[Epoch {epoch}] 🔍 Entropy Loss: {entropy_val:.4f}")
             else:
                 entropy_list.append(0.0)
+                variance_list.append(0.0)
 
         avg_loss = total_loss / len(train_loader)
         logging.info(f"[Epoch {epoch}] 🏋️ Avg Train Loss: {avg_loss:.4f}")
@@ -164,7 +168,6 @@ def train():
         # ===================== Early Stopping & Checkpoint =====================
         if acc > best_acc:
             best_acc = acc
-            best_epoch = epoch
             current = 0
             best_model_state = model.state_dict()
             logging.info(f"✅ New best at epoch {epoch}, acc={best_acc:.2f}%")
@@ -200,19 +203,21 @@ def train():
     plt.savefig(os.path.join(fig_dir, f"epoch_acc_curve_acc{best_acc}.png"))
     logging.info("📊 Accuracy plot saved.")
 
-    if entropy_list:
+    if entropy_list or variance_list:
         plt.figure(figsize=(8, 4))
+
         def smooth_curve(values, window=5):
             return np.convolve(values, np.ones(window) / window, mode='valid')
         plt.plot(smooth_curve(entropy_list), label="Entropy Loss (smoothed)", color="orange")
+        plt.plot(smooth_curve(variance_list), label="Variance Loss (smoothed)", color="blue")
         plt.xlabel("Epoch")
         plt.ylabel("Entropy")
-        plt.title("Attribution Entropy per Epoch")
+        plt.title("Attribution Entropy and variance per Epoch")
         plt.grid(True)
         plt.legend()
         plt.tight_layout()
-        plt.savefig(os.path.join(fig_dir, "epoch_entropy_curve.png"))
-        logging.info("📉 Entropy plot saved.")
+        plt.savefig(os.path.join(fig_dir, "epoch_entropy_and_variance_curve.png"))
+        logging.info("📉 Entropy and variance plot saved.")
 
 if __name__ == "__main__":
     train()

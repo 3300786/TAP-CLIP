@@ -32,7 +32,7 @@ def fine_tune_on_few_shot(model, loader, device, steps=10, lr=5e-3):
 
 def generate_output_paths(version: str):
     tag = datetime.now().strftime("%Y%m%d_%H%M")
-    base = f"results/{version}_{tag}"
+    base = f"results/{version}_test/{tag}"
     paths = {
         "base": base,
         "csv": os.path.join(base, "csv"),
@@ -44,12 +44,12 @@ def generate_output_paths(version: str):
 
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    version = "May16"
+    version = "May16+"
 
     # -------- Config -------- #
     pretrained_path = "G:/dsCLIP/open_clip_pytorch_model.bin"
     model_acc = 97.43
-    model_path = "results/version3/20250516_1944/models/best_model_attr_20250516_1944_acc97.43.pt"
+    model_path = r"G:\dsCLIP\results\version3\20250517_1953\models\best_model_attr_20250517_1953_acc97.43.pt"
 
     class_names = ["Backpack", "Alarm_Clock", "Laptop", "Pen", "Mug"]
     prompt_len = 5

@@ -6,7 +6,7 @@ from models.attribution_monitor import AttributionMonitor
 from models.prompt_adjustor import PromptAdjustor
 from models.prompt_learner import PromptLearner
 from utils.eval_metrics import attribution_entropy, attribution_variance
-
+from math import cos, pi
 
 class FullModel(nn.Module):
     def __init__(self, class_names, clip_wrapper, prompt_len=5, attr_lambda=0.05, stab_lambda=0.1,
@@ -89,20 +89,25 @@ class FullModel(nn.Module):
             all_attr = torch.stack(all_attributions, dim=1)  # [B, C, prompt_len]
 
             if self.training_epoch < self.warmup_epoch:
-                loss_total = loss_cls
-                print(f"🔧 Warmup epoch {self.training_epoch}/{self.warmup_epoch}: skipping attribution regularization")
+                scale = self.training_epoch / self.warmup_epoch  # 线性递增，范围 [0, 1]
+                # scale = 0.5 * (1 - cos(pi * self.training_epoch / self.warmup_epoch))
             else:
-                entropy_loss = attribution_entropy(all_attr.mean(dim=1))
-                variance_loss = attribution_variance(all_attr.mean(dim=1), labels)
-                loss_total = loss_cls + self.stab_lambda * entropy_loss + self.attr_lambda * variance_loss
-                outputs.update({
-                    "loss_entropy": entropy_loss,
-                    "loss_variance": variance_loss
-                })
+                scale = 1.0
+
+            entropy_loss = attribution_entropy(all_attr.mean(dim=1))
+            variance_loss = attribution_variance(all_attr.mean(dim=1), labels)
+
+            loss_total = (
+                    loss_cls
+                    + scale * self.stab_lambda * entropy_loss
+                    + scale * self.attr_lambda * variance_loss
+            )
 
             outputs.update({
                 "loss": loss_total,
-                "loss_cls": loss_cls
+                "loss_cls": loss_cls,
+                "loss_entropy": entropy_loss,
+                "loss_variance": variance_loss
             })
 
         if return_attribution:
