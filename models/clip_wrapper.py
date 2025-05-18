@@ -56,7 +56,7 @@ class CLIPWrapper(nn.Module):
         return self.preprocess
 
     # ✅ 新增：从已构建 prompt embedding 中获得 attention
-    def get_attention_weights_from_prompt_embedding(self, prompt_embeddings, chunk_size=16):
+    def get_attention_weights_from_prompt_embedding(self, prompt_embeddings, chunk_size=4):
         """
         计算给定 prompt embedding 的 attention 权重（mean over heads, 可导）
 
