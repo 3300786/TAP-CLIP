@@ -22,6 +22,9 @@ class CLIPWrapper(nn.Module):
 
         self.tokenizer = open_clip.get_tokenizer(model_name)
 
+        # ✅ 添加这一行：暴露 token embedding 层给外部访问
+        self.token_embedding = self.model.token_embedding
+
     def _register_text_attention_hook(self):
         def hook_fn(module, input, output):
             # output[0]: [B, H, T, T] or sometimes [H, T, T]
@@ -104,25 +107,6 @@ class CLIPWrapper(nn.Module):
 
         return torch.cat(outputs, dim=0)  # [B*C, T, T]
 
-    def encode_text_from_embeddings(self, token_embeddings, eot_index=None):
-        """
-        Args:
-            token_embeddings: [B, T, D] 输入的是 embedding（非 token id）
-            eot_index: 指定用于提取文本特征的位置索引，默认使用最后一个 token
-        Returns:
-            text features: [B, D]
-        """
-        x = token_embeddings + self.model.positional_embedding[:token_embeddings.size(1)].to(token_embeddings.device)
-        x = x.permute(1, 0, 2)  # [T, B, D]
-        x = self.model.transformer(x)
-        x = x.permute(1, 0, 2)  # [B, T, D]
-        x = self.model.ln_final(x)
-
-        if eot_index is None:
-            eot_index = x.shape[1] - 1  # 默认最后一位
-        x = x[torch.arange(x.shape[0]), eot_index, :]
-        x = x @ self.model.text_projection
-        return x
 
     def get_max_text_len(self):
         return self.model.positional_embedding.size(0)

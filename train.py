@@ -37,10 +37,11 @@ def train():
     patience = 10
     lr = 2e-3
     decay = 0.01
-    warmup_epoch = 20
+    warmup_epoch = 5
     seed = 42
     resume = False
-    class_names = ["Backpack", "Alarm_Clock", "Laptop", "Pen", "Mug"]
+    class_names = ["Backpack", "Alarm_Clock", "Laptop", "Pen", "Mug", "Curtains", "Glasses", "Scissors", "Webcam"]
+
     pretrained_path = "G:/dsCLIP/open_clip_pytorch_model.bin"
 
     os.makedirs(base_dir, exist_ok=True)
@@ -67,6 +68,9 @@ def train():
         class_specific=True,
         warmup_epoch=warmup_epoch
     ).to(device)
+    print("🔍 Checking trainable parameters in PromptLearner:")
+    for name, param in model.prompt_learner.named_parameters():
+        print(f"{name} - requires_grad: {param.requires_grad}")
 
     # ===================== Logging =====================
     log_file = os.path.join(log_dir, f"train_{tag}.log")
@@ -117,7 +121,14 @@ def train():
     entropy_list = []
     variance_list = []
     current = 0
+    acc = evaluate_accuracy(model, val_loader, device)
+    acc_list.append(acc)
+    logging.info(f"[Initial] 🧪 Val Accuracy: {acc:.2f}%")
 
+    per_cls_acc = evaluate_per_class_accuracy(model, val_loader, device, class_names)
+    for cls in class_names:
+        per_class_dict[cls].append(per_cls_acc[cls])
+    logging.info(f"[Initial] 📊 Per-Class Accuracy: {per_cls_acc}")
     # ===================== 训练循环 =====================
     for epoch in range(start_epoch, epochs + 1):
         model.train()
@@ -162,7 +173,7 @@ def train():
             per_class_dict[cls].append(per_cls_acc[cls])
         logging.info(f"[Epoch {epoch}] 📊 Per-Class Accuracy: {per_cls_acc}")
 
-        if epoch % 10 == 0:
+        if epoch % 10 == 0 and model.training_epoch >= model.warmup_epoch:
             _ = visualize_attribution_for_class(model, val_loader, target_class=0, epoch=epoch, device=device)
 
         # ===================== Early Stopping & Checkpoint =====================

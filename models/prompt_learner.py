@@ -1,8 +1,12 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import random
+
 
 class PromptLearner(nn.Module):
-    def __init__(self, class_names, clip_model, prompt_len=5, prefix_len=5, use_init_prompt=True, device='cuda', max_len=77):
+    def __init__(self, class_names, clip_model, prompt_len=5, prefix_len=5,
+                 use_init_prompt=True, device='cuda', max_len=77):
         super().__init__()
         self.prompt_len = prompt_len
         self.prefix_len = prefix_len
@@ -13,15 +17,20 @@ class PromptLearner(nn.Module):
         self.use_init_prompt = use_init_prompt
         self.max_len = max_len
 
-        # Shared prefix prompt
+        # 多样化模板增强语义
+        self.templates = [
+            "a photo of a {}",
+            "a picture of the {}",
+            "an image of a {}",
+            "this is a {}",
+            "this is a photo of a {}",
+        ]
+
         self.prefix = nn.Parameter(torch.randn(prefix_len, self.ctx_dim))
-
-        # Class-specific prompt bank
         self.context_bank = nn.ParameterDict()
-        self.token_bank = {}
+        self.token_id_bank = {}
 
-        print(f"Using prefix_len={prefix_len}, class-specific context_len={prompt_len}, total limit={max_len}")
-
+        print(f"Using prefix_len={prefix_len}, prompt_len={prompt_len}, total limit={max_len}")
         for name in class_names:
             self.add_class_prompt(name)
 
@@ -30,42 +39,43 @@ class PromptLearner(nn.Module):
             return
 
         with torch.no_grad():
-            text = f"a photo of a {class_name}"
-            tokenized = self.tokenizer(text).to(self.device)
-            token_emb = self.token_embedding(tokenized.unsqueeze(0)).squeeze(0)
+            template = random.choice(self.templates)
+            text = template.format(class_name)
 
-            max_cls_token_len = self.max_len - (self.prefix_len + self.prompt_len)
-            if token_emb.shape[0] > max_cls_token_len:
-                # print(f"⚠️ Class name '{class_name}' tokens too long ({token_emb.shape[0]}), truncating to {max_cls_token_len}")
-                token_emb = token_emb[:max_cls_token_len]
+            tokenized = self.tokenizer(text).to(self.device)  # [T]
+            valid_idx = tokenized != 0
+            tokenized = tokenized[valid_idx]
 
-            self.token_bank[class_name] = token_emb.to(self.device)
+            token_emb = self.token_embedding(tokenized.unsqueeze(0)).squeeze(0)  # [T, D]
 
-            if self.use_init_prompt and token_emb.shape[0] >= 5 + self.prompt_len:
-                ctx_init = token_emb[5:5 + self.prompt_len].clone()
+            # 限制 token embedding 长度并补齐到 max_token_len
+            max_token_len = self.max_len - self.prefix_len - self.prompt_len
+            if token_emb.shape[0] > max_token_len:
+                token_emb = token_emb[:max_token_len]
+                tokenized = tokenized[:max_token_len]
+            else:
+                pad_len = max_token_len - token_emb.shape[0]
+                token_emb = F.pad(token_emb, (0, 0, 0, pad_len))        # [T+pad_len, D]
+                tokenized = F.pad(tokenized, (0, pad_len), value=0)     # [T+pad_len]
+
+            # 初始化 context embedding
+            if self.use_init_prompt and token_emb.shape[0] >= self.prompt_len:
+                center = token_emb.shape[0] // 2
+                start = max(center - self.prompt_len // 2, 0)
+                end = start + self.prompt_len
+                if end > token_emb.shape[0]:
+                    end = token_emb.shape[0]
+                    start = end - self.prompt_len
+                ctx_init = token_emb[start:end].clone()
                 ctx_init = (ctx_init - ctx_init.mean(dim=0)) / (ctx_init.std(dim=0) + 1e-6)
             else:
                 ctx_init = torch.randn(self.prompt_len, self.ctx_dim).to(self.device)
 
         self.context_bank[class_name] = nn.Parameter(ctx_init)
+        self.token_id_bank[class_name] = tokenized
 
-    def forward(self):
-        prompts = []
-        for cls in self.context_bank:
-            prefix = self.prefix.unsqueeze(0)  # [1, prefix_len, D]
-            ctx = self.context_bank[cls].unsqueeze(0)  # [1, prompt_len, D]
-            token = self.token_bank[cls].unsqueeze(0) if self.token_bank[cls].dim() == 2 else self.token_bank[cls]
-
-            total_len = prefix.size(1) + ctx.size(1) + token.size(1)
-            if total_len > self.max_len:
-                excess = total_len - self.max_len
-                # print(f"⚠️ Prompt for '{cls}' too long ({total_len}), trimming class token by {excess} tokens")
-                token = token[:, :-excess]
-
-            prompt = torch.cat([prefix, ctx, token], dim=1)  # [1, T, D]
-            prompts.append(prompt)
-
-        return torch.cat(prompts, dim=0)  # [C, T, D]
+    def get_prompt_parts(self):
+        return self.prefix, self.context_bank, self.token_id_bank
 
     @property
     def n_cls(self):
