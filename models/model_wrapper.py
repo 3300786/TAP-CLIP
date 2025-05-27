@@ -30,16 +30,16 @@ class FullModel(nn.Module):
         self.training_epoch = 0
 
     def forward(self, images, labels=None, return_attribution=False):
+        # self.clip.reset()
+
         B = images.size(0)
         max_len = self.clip.get_max_text_len()
 
-        # 平滑插值系数：在 warmup_epoch 前逐渐从 0 增长至 1
         scale = 0.5 * (1 - cos(pi * self.training_epoch / self.warmup_epoch)) \
             if self.training_epoch < self.warmup_epoch else 1.0
 
         prefix, context_bank, token_id_bank = self.prompt_learner.get_prompt_parts()
-        with torch.no_grad():
-            image_feat = self.clip.encode_image(images)
+        image_feat = self.clip.encode_image(images)  # 保留梯度
         image_feat = image_feat / image_feat.norm(dim=-1, keepdim=True)
 
         def get_token_embedding(cls):
@@ -50,38 +50,38 @@ class FullModel(nn.Module):
             max_token_len = max_len - prefix.size(0) - context_bank[cls].size(0)
             if emb.size(0) > max_token_len:
                 emb = emb[:max_token_len]
-            return emb.unsqueeze(0)
+            return emb.unsqueeze(0).detach()  # ✅ 防止 token embedding 引发图扩散
 
-        prompt_list = []
+        text_feats = []
         all_attr = []
+
         for cls in self.class_names:
-            pre = prefix.unsqueeze(0).expand(B, -1, -1)
+            pre = prefix.unsqueeze(0).expand(B, -1, -1)  # ✅ 明确 detach
             ctx = context_bank[cls].unsqueeze(0).expand(B, -1, -1)
             token = get_token_embedding(cls).expand(B, -1, -1)
 
-            # 获取 attention 权重并做 attribution
-            prompt_for_attn = torch.cat([pre, ctx, token], dim=1)
-            attn_map = self.clip.get_attention_weights_from_prompt_embedding(prompt_for_attn)
-            attn_map = attn_map.view(B, attn_map.size(-1), attn_map.size(-1))
-            attr = self.attribution_monitor(attn_map)
+            with torch.no_grad():  # ✅ clip attention 不构建图
+                attn_prompt = torch.cat([pre, ctx, token], dim=1)
+                attn_map = self.clip.get_attention_weights_from_prompt_embedding(attn_prompt)
+                attn_map = attn_map.view(B, attn_map.size(-1), attn_map.size(-1))
 
-            if self.training and torch.rand(1).item() < 0.05:
-                print(
-                    f"[ATTR] class={cls} mean={attr.mean().item():.4f}, std={attr.std().item():.4f}, scale={scale:.2f}")
+            attr = self.attribution_monitor(attn_map)  # [B, prompt_len]
+            adjusted = self.prompt_adjustor(ctx, attr)  # ✅ 保留梯度
+            adjusted_ctx = (1 - scale) * ctx + scale * adjusted  # ✅ 有梯度，只作用于 adjusted
 
-            adjusted = self.prompt_adjustor(ctx, attr)
-            adjusted_ctx = (1 - scale) * ctx + scale * adjusted  # 关键插值操作
+            # ⚠️ 拼接 prompt 立即构造 text_feat，防止全保留计算图
             full_prompt = torch.cat([pre, adjusted_ctx, token], dim=1)
-            prompt_list.append(full_prompt)
-            all_attr.append(attr)
 
-        adjusted_prompts = torch.stack(prompt_list, dim=1)  # [B, C, T, D]
-        all_attr = torch.stack(all_attr, dim=1)  # [B, C, prompt_len]
+            # ✅ 一次 forward，一次编码，立即归一化后拼接，避免大图保留
+            with torch.cuda.amp.autocast():
+                chunk_feat = self.manual_encode_text(full_prompt)
+                chunk_feat = chunk_feat / chunk_feat.norm(dim=-1, keepdim=True)
+            text_feats.append(chunk_feat)
+            all_attr.append(attr.detach())
 
-        flat_prompts = adjusted_prompts.view(B * self.n_cls, -1, adjusted_prompts.size(-1))
-        text_feat = self.manual_encode_text(flat_prompts)
+        # ✅ 拼接结果（全为叶子节点，无旧图）
+        text_feat = torch.stack(text_feats, dim=1)  # [B, C, D]
         text_feat = text_feat / text_feat.norm(dim=-1, keepdim=True)
-        text_feat = text_feat.view(B, self.n_cls, -1)
 
         sim = self.logit_scale.exp() * (image_feat.unsqueeze(1) * text_feat).sum(dim=-1)
         logits = sim
@@ -89,10 +89,8 @@ class FullModel(nn.Module):
 
         if labels is not None:
             loss_cls = F.cross_entropy(logits, labels)
-
-            entropy_loss = attribution_entropy(all_attr.mean(dim=1))
-            variance_loss = attribution_variance(all_attr.mean(dim=1), labels)
-
+            entropy_loss = attribution_entropy(torch.stack(all_attr, dim=1).mean(dim=1))  # ✅ detached 了
+            variance_loss = attribution_variance(torch.stack(all_attr, dim=1).mean(dim=1), labels)
             cos_sim = F.cosine_similarity(text_feat.unsqueeze(2), text_feat.unsqueeze(1), dim=-1)
             div_loss = ((cos_sim - torch.eye(self.n_cls, device=cos_sim.device)) ** 2).mean()
 
@@ -111,15 +109,14 @@ class FullModel(nn.Module):
             })
 
         if return_attribution:
-            outputs["attribution"] = all_attr.mean(dim=1)
+            outputs["attribution"] = torch.stack(all_attr, dim=1).mean(dim=1)
 
         return outputs
 
     def manual_encode_text(self, prompt_emb):
         # prompt_emb: [B*C, T, D]
-        x = prompt_emb + self.clip.model.positional_embedding[:prompt_emb.size(1)].to(prompt_emb.device)  # [B*C, T, D]
-        x = self.clip.model.transformer(x)  # 通常为 ResidualAttentionBlock stack
+        x = prompt_emb + self.clip.model.positional_embedding[:prompt_emb.size(1)].to(prompt_emb.device)
+        x = self.clip.model.transformer(x)
         x = self.clip.model.ln_final(x)
-        # 通常第一个 token 是 [CLS] 或者用平均
-        x = x[torch.arange(x.shape[0]), -1]  # 如果模型是 [EOS] 聚合
-        return x  # shape [B*C, D]
+        x = x[torch.arange(x.shape[0]), -1]  # 最后一个 token（EOS）
+        return x

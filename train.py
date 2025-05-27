@@ -42,7 +42,7 @@ def train():
     resume = False
     class_names = ["Backpack", "Alarm_Clock", "Laptop", "Pen", "Mug", "Curtains", "Glasses", "Scissors", "Webcam"]
 
-    pretrained_path = "G:/dsCLIP/open_clip_pytorch_model.bin"
+    pretrained_path = "open_clip_pytorch_model.bin"
 
     os.makedirs(base_dir, exist_ok=True)
     log_dir = os.path.join(base_dir, "logs")

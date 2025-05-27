@@ -61,7 +61,7 @@ class PromptAdjustor(nn.Module):
             k = self.attn_k(prompt_embed)         # [B, T, D]
             v = self.attn_v(prompt_embed)         # [B, T, D]
 
-            attn_score = torch.softmax(torch.matmul(q, k.transpose(-2, -1)) / (D ** 0.5), dim=-1)  # [B, T, T]
+            attn_score = torch.softmax(torch.matmul(q, k.transpose(-2, -1)) / (D ** 0.5), dim=-1).detach()  # [B, T, T]
             attn_out = torch.matmul(attn_score, v)  # [B, T, D]
 
             out = prompt_embed + self.gate * self.dropout(attn_out)

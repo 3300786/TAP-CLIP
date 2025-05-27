@@ -33,8 +33,8 @@ class AttributionMonitor(nn.Module):
         raw_score = attn_map[:, ctx_start:ctx_end, cls_token_index]  # [B, prompt_len]
 
         if self.normalize:
-            attribution = F.softmax(raw_score, dim=-1)
+            attribution = F.softmax(raw_score, dim=-1).detach()
         else:
-            attribution = raw_score
+            attribution = raw_score.detach()
 
         return attribution  # [B, prompt_len]
