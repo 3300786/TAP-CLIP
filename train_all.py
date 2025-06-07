@@ -11,7 +11,7 @@ from torch.utils.data import ConcatDataset, DataLoader
 from models.model_wrapper import FullModel
 from models.clip_wrapper import CLIPWrapper
 from utils.eval_metrics import evaluate_accuracy, evaluate_per_class_accuracy, visualize_attribution_for_class
-from datasets import OfficeHome, fewshot_sampler
+from datasets import OfficeHome, fewshot_sampler, DomainNet
 import gc
 
 
@@ -156,6 +156,7 @@ def main(args):
     domains = ["A", "C", "P", "R"]
     domain_map = {"A": "Art", "C": "Clipart", "P": "Product", "R": "Real_World"}
     dataset = OfficeHome(root="data/")
+    # dataset = DomainNet(root="/root/autodl-tmp/data/")
     class_names = dataset[0].classes
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -166,7 +167,7 @@ def main(args):
             set_seed(seed)
             print(f"\n🔁 Domain: {domain_map[domain]} | Seed: {seed}")
 
-            clip = CLIPWrapper(pretrained_path=args.pretrained_path, device=device)
+            clip = CLIPWrapper(pretrained_path=args.pretrained_path, device=device, lora_layers=args.lora_layers)
             preprocess = clip.get_preprocess()
 
             train_sets = []
@@ -189,8 +190,8 @@ def main(args):
                 attr_lambda=args.attr_lambda,
                 stab_lambda=args.stab_lambda,
                 adjustor_method='residual',
-                class_specific=True,
-                warmup_epoch=args.warmup_epoch
+                # class_specific=True,
+                warmup_epoch=args.warmup_epoch,
             ).to(device)
 
             prompt_params = (
@@ -250,7 +251,8 @@ if __name__ == "__main__":
     parser.add_argument('--prefix_len', type=int, default=5)
     parser.add_argument("--lora_lr", type=float, default=5e-4,
                         help="learning-rate for LoRA layers")
-
+    parser.add_argument("--lora_layers", type=int, default=16,
+                        help="LoRA layers")
 
     args = parser.parse_args()
     main(args)

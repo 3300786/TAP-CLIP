@@ -1,45 +1,53 @@
 import os
-import torch
 import torch.nn.functional as F
 from collections import defaultdict
 from torchvision.utils import save_image
 import matplotlib.pyplot as plt
 
+from collections import Counter
+from torch import amp
+import torch
+
+
+@torch.no_grad()
 def evaluate_accuracy(model, dataloader, device):
     model.eval()
-    correct = 0
+
     total = 0
-    per_class_correct = defaultdict(int)
-    per_class_total = defaultdict(int)
+    correct = 0
+    cls_cnt = Counter()  # {cls: total}
+    cls_ok = Counter()  # {cls: correct}
 
-    with torch.no_grad():
-        for images, labels in dataloader:
-            images = images.to(device)
-            labels = labels.to(device)
+    # ✨ 利用半精度推理（与训练同 AMP）
+    autocast = amp.autocast
+    with autocast(device_type="cuda", dtype=torch.bfloat16):
+        for images, labels in dataloader:  # dataloader 设大 batch、pin_memory
+            images = images.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
 
-            outputs = model(images)
-            logits = outputs['logits'].detach()
-            preds = torch.argmax(logits, dim=1)
+            logits = model(images)["logits"]  # 前向
+            preds = logits.argmax(dim=1)
 
-            correct += (preds == labels).sum().item()
+            # ❶ 在 GPU 上累加，再一次性转 CPU
+            correct += (preds == labels).sum()
             total += labels.size(0)
 
-            for t, p in zip(labels, preds):
-                per_class_total[t.item()] += 1
-                if t == p:
-                    per_class_correct[t.item()] += 1
+            # ❷ 用 tensor.histc 统计各类
+            cls_cnt += Counter(labels.tolist())
+            cls_ok += Counter(labels[preds == labels].tolist())
 
-    acc = 100.0 * correct / total if total > 0 else 0.0
+    # ❸ 这里才同步
+    correct = correct.item()
+    acc = 100.0 * correct / total
+
     print(f"🎯 Overall Accuracy: {acc:.2f}%")
-
-    print("📊 Per-Class Accuracy:")
-    for cls in sorted(per_class_total.keys()):
-        total_c = per_class_total[cls]
-        correct_c = per_class_correct[cls]
-        acc_c = 100.0 * correct_c / total_c if total_c > 0 else 0.0
-        print(f" - Class {cls:2d}: {acc_c:.2f}% ({correct_c}/{total_c})")
+    for cls in sorted(cls_cnt):
+        tot = cls_cnt[cls]
+        ok = cls_ok[cls]
+        print(f" - Class {cls:2d}: {100.0 * ok / tot:5.2f}% ({ok}/{tot})")
 
     return acc
+
 
 def evaluate_per_class_accuracy(model, dataloader, device, class_names=None):
     model.eval()
@@ -70,15 +78,18 @@ def evaluate_per_class_accuracy(model, dataloader, device, class_names=None):
 
     return acc_dict
 
+
 def attribution_entropy(attribution_scores):
     eps = 1e-8
     p = attribution_scores + eps
     entropy = -(p * torch.log(p)).sum(dim=-1)
     return entropy.mean()
 
+
 def attribution_variance(attribution_scores, labels):
     if attribution_scores.size(0) != labels.size(0):
-        raise ValueError(f"Mismatch in batch size: attribution_scores={attribution_scores.shape}, labels={labels.shape}")
+        raise ValueError(
+            f"Mismatch in batch size: attribution_scores={attribution_scores.shape}, labels={labels.shape}")
 
     classes = torch.unique(labels)
     variances = []
@@ -91,6 +102,7 @@ def attribution_variance(attribution_scores, labels):
             variances.append(torch.tensor(0.0).to(attribution_scores.device))
 
     return torch.stack(variances).mean()
+
 
 def visualize_attribution_for_class(model, dataloader, target_class, epoch,
                                     device="cuda", save_dir="results/attribution", max_samples=3):
@@ -129,7 +141,8 @@ def visualize_attribution_for_class(model, dataloader, target_class, epoch,
                         bar.set_color('red')
                     elif attr[i] == min_attr:
                         bar.set_color('blue')
-                plt.title(f"Epoch {epoch} | Sample {idx} | Class {target_class} | max={max_attr:.3f}, min={min_attr:.3f}")
+                plt.title(
+                    f"Epoch {epoch} | Sample {idx} | Class {target_class} | max={max_attr:.3f}, min={min_attr:.3f}")
                 plt.xlabel("Prompt Token Index")
                 plt.ylabel("Attribution Score")
                 plt.tight_layout()
@@ -150,6 +163,7 @@ def visualize_attribution_for_class(model, dataloader, target_class, epoch,
     gc.collect()
     torch.cuda.empty_cache()
     return count
+
 
 def plot_entropy_distribution(model, dataloader, device, save_path="results/attribution_entropy_dist.png"):
     model.eval()
@@ -175,6 +189,7 @@ def plot_entropy_distribution(model, dataloader, device, save_path="results/attr
     plt.savefig(save_path)
     plt.close()
     print(f"✅ Entropy distribution saved: {save_path}")
+
 
 def assert_all_on_gpu(model, *tensors):
     if not torch.cuda.is_available():

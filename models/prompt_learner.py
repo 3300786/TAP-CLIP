@@ -1,3 +1,4 @@
+#prompt learner
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -33,6 +34,14 @@ class PromptLearner(nn.Module):
         print(f"Using prefix_len={prefix_len}, prompt_len={prompt_len}, total limit={max_len}")
         for name in class_names:
             self.add_class_prompt(name)
+        self.K_style = 8  # 可调
+        self.style_tokens = nn.Parameter(  # [K, D]
+            torch.randn(self.K_style, self.ctx_dim)
+        )
+
+    def get_style_tokens(self):
+        # 返回 [K, 1, D] 方便后续 expand
+        return self.style_tokens.unsqueeze(1)  # K×1×D
 
     def add_class_prompt(self, class_name):
         if class_name in self.context_bank:

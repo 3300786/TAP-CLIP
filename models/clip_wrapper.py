@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import open_clip
+from torch.nn import functional as F
 
 
 class LoRALinear(nn.Module):
@@ -18,28 +19,30 @@ class LoRALinear(nn.Module):
 
         # 🔑 关键：显式把 weight / bias 暴露出去
         self.weight = self.linear.weight
-        self.bias   = self.linear.bias       # 若原来没 bias，可设置为 None
+        self.bias = self.linear.bias  # 若原来没 bias，可设置为 None
 
     def forward(self, x):
         # 与 nn.Linear 行为保持一致
         return F.linear(x, self.weight, self.bias) + \
-               (self.dropout(x) @ self.lora_A.T @ self.lora_B.T) * self.scaling
+            (self.dropout(x) @ self.lora_A.T @ self.lora_B.T) * self.scaling
 
 
 class CLIPWrapper(nn.Module):
 
-    def __init__(self, model_name='ViT-B-16', pretrained_path='path/to/open_clip_pytorch_model_16.bin', device='cuda'):
+    def __init__(self, model_name='ViT-B-16', pretrained_path='path/to/open_clip_pytorch_model_16.bin', device='cuda',
+                 lora_layers=16):
         super().__init__()
         self.device = device
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(model_name, pretrained='')
         state_dict = torch.load(pretrained_path, map_location=device)
         self.model.load_state_dict(state_dict, strict=True)
         self.model.to(device).eval()
-
+        # self.model.transformer.gradient_checkpointing_enable()
+        # self.model.visual.transformer.gradient_checkpointing_enable()
         for p in self.model.parameters():
             p.requires_grad = False
 
-        self.add_lora_to_visual(self.model.visual, n_last=4)
+        self.add_lora_to_visual(self.model.visual, r=lora_layers, n_last=4)
 
         self.tokenizer = open_clip.get_tokenizer(model_name)
         self.token_embedding = self.model.token_embedding
